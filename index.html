@@ -772,7 +772,7 @@
 <div class="header">
   <div class="header-left">
     <h1>UPSC CSE 2027 — Study Planner</h1>
-    <p>CIVIL SERVICES EXAMINATION · 2027 CYCLE · PRELIMS MAY 2027 · BEGINNER MODE</p>
+    <p>CIVIL SERVICES EXAMINATION · 2027 CYCLE · PRELIMS MAY 2027 · BEGINNER MODE &nbsp;|&nbsp; <span id="syncStatus" style="font-size:11px;">↓ Loading...</span></p>
   </div>
   <div class="header-stats">
     <div class="hstat">
@@ -1336,6 +1336,130 @@
 </div>
 
 <script>
+// ==================== GOOGLE SHEETS API ====================
+const API_URL = 'https://script.google.com/macros/s/AKfycbwKxlDoH7mdWG22EI_VDr4Fa44EaGQHjz_6tOa_2FmFZDg4uuiIsYwLWlbJel3sX19Q/exec';
+
+let syncTimeout = null;
+let isSyncing = false;
+let pendingSync = false;
+
+function showSyncStatus(msg, color) {
+  const el = document.getElementById('syncStatus');
+  if (el) { el.textContent = msg; el.style.color = color || 'var(--text3)'; }
+}
+
+async function pushToSheet(sheetName, rows) {
+  try {
+    await fetch(API_URL, {
+      method: 'POST',
+      mode: 'no-cors',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ sheet: sheetName, data: rows })
+    });
+  } catch(e) { /* no-cors swallows errors — fire and forget */ }
+}
+
+async function pullFromSheet(sheetName) {
+  try {
+    const res = await fetch(`${API_URL}?sheet=${sheetName}`);
+    return await res.json();
+  } catch(e) { return null; }
+}
+
+// Debounced sync — waits 2s after last change before pushing
+function scheduleSave() {
+  localStorage.setItem('upsc_state_2027', JSON.stringify(state));
+  showSyncStatus('● Unsaved changes', '#e8b96f');
+  clearTimeout(syncTimeout);
+  syncTimeout = setTimeout(syncAll, 2000);
+}
+
+async function syncAll() {
+  if (isSyncing) { pendingSync = true; return; }
+  isSyncing = true;
+  showSyncStatus('↑ Syncing...', 'var(--text3)');
+  try {
+    // topics
+    const topicRows = [['id','status']];
+    Object.entries(state.topicStatus).forEach(([id,s]) => topicRows.push([id,s]));
+    await pushToSheet('topics', topicRows);
+
+    // writing
+    const wRows = [['topic','type','date','score','status']];
+    state.writingLog.forEach(w => wRows.push([w.topic, w.type, w.date, w.score, w.status]));
+    await pushToSheet('writing', wRows);
+
+    // mcq
+    const mRows = [['subject','total','correct','date']];
+    state.mcqSessions.forEach(m => mRows.push([m.subject, m.total, m.correct, m.date]));
+    await pushToSheet('mcq', mRows);
+
+    // calendar
+    const cRows = [['key','type']];
+    state.studiedDays.forEach(k => cRows.push([k,'studied']));
+    state.skippedDays.forEach(k => cRows.push([k,'skipped']));
+    await pushToSheet('calendar', cRows);
+
+    showSyncStatus('✓ Synced to Google Sheets', 'var(--interview)');
+    setTimeout(() => showSyncStatus('● Cloud sync ON', 'var(--text3)'), 3000);
+  } catch(e) {
+    showSyncStatus('⚠ Sync failed — saved locally', '#e86f6f');
+  }
+  isSyncing = false;
+  if (pendingSync) { pendingSync = false; syncAll(); }
+}
+
+async function loadFromSheets() {
+  showSyncStatus('↓ Loading from Google Sheets...', 'var(--text3)');
+  try {
+    const [tRaw, wRaw, mRaw, cRaw] = await Promise.all([
+      pullFromSheet('topics'),
+      pullFromSheet('writing'),
+      pullFromSheet('mcq'),
+      pullFromSheet('calendar'),
+    ]);
+
+    // topics
+    if (tRaw && tRaw.length > 1) {
+      state.topicStatus = {};
+      tRaw.slice(1).forEach(r => { if (r[0]) state.topicStatus[r[0]] = r[1]; });
+    }
+
+    // writing
+    if (wRaw && wRaw.length > 1) {
+      state.writingLog = wRaw.slice(1)
+        .filter(r => r[0])
+        .map(r => ({ topic: r[0], type: r[1], date: r[2], score: r[3], status: r[4] }));
+    }
+
+    // mcq
+    if (mRaw && mRaw.length > 1) {
+      state.mcqSessions = mRaw.slice(1)
+        .filter(r => r[0])
+        .map(r => ({ subject: r[0], total: Number(r[1]), correct: Number(r[2]), date: r[3] }));
+    }
+
+    // calendar
+    if (cRaw && cRaw.length > 1) {
+      state.studiedDays = [];
+      state.skippedDays = [];
+      cRaw.slice(1).forEach(r => {
+        if (!r[0]) return;
+        if (r[1] === 'studied') state.studiedDays.push(r[0]);
+        else if (r[1] === 'skipped') state.skippedDays.push(r[0]);
+      });
+    }
+
+    localStorage.setItem('upsc_state_2027', JSON.stringify(state));
+    showSyncStatus('✓ Loaded from Google Sheets', 'var(--interview)');
+    setTimeout(() => showSyncStatus('● Cloud sync ON', 'var(--text3)'), 3000);
+    return true;
+  } catch(e) {
+    showSyncStatus('⚠ Offline — using local data', '#e8b96f');
+    return false;
+  }
+}
+
 // ==================== STATE ====================
 let state = JSON.parse(localStorage.getItem('upsc_state_2027') || 'null') || {
   topicStatus: {},
@@ -1633,7 +1757,7 @@ function updateCountdown() {
 // ==================== NOTES ====================
 function saveNotes() {
   state.todayNotes = document.getElementById('todayNotes').value;
-  save();
+  scheduleSave();
 }
 
 // ==================== TABS ====================
@@ -1650,17 +1774,35 @@ function switchTab(tab) {
 
 // ==================== SAVE ====================
 function save() {
-  try { localStorage.setItem('upsc_state_2027', JSON.stringify(state)); } catch(e) {}
+  scheduleSave();
 }
 
 // ==================== INIT ====================
-document.addEventListener('DOMContentLoaded', () => {
+document.addEventListener('DOMContentLoaded', async () => {
   updateCountdown();
+  // First paint from localStorage instantly
   updateOverallPct();
   updateStreak();
   renderCalendar();
-  if (state.todayNotes) document.getElementById('todayNotes').value = state.todayNotes;
   renderMcqGrid();
+  if (state.todayNotes) document.getElementById('todayNotes').value = state.todayNotes;
+
+  // Then load fresh data from Google Sheets and re-render
+  const loaded = await loadFromSheets();
+  if (loaded) {
+    updateOverallPct();
+    updateStreak();
+    renderCalendar();
+    renderMcqGrid();
+    if (state.todayNotes) document.getElementById('todayNotes').value = state.todayNotes;
+    // Re-render active tab
+    const activePanel = document.querySelector('.panel.active');
+    if (activePanel) {
+      const id = activePanel.id.replace('panel-', '');
+      if (id === 'topics') renderTopics();
+      if (id === 'writing') renderWritingLog();
+    }
+  }
 });
 </script>
 </body>
