@@ -1546,7 +1546,10 @@ async function loadFromSheets() {
 function save() {
   localStorage.setItem('upsc_state_2027', JSON.stringify(state));
 }
-function scheduleSave() { save(); }
+// scheduleSave — same as save, kept for legacy calls
+function scheduleSave() {
+  localStorage.setItem('upsc_state_2027', JSON.stringify(state));
+}
 
 // ==================== STATE ====================
 let state = JSON.parse(localStorage.getItem('upsc_state_2027') || 'null') || {
