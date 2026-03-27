@@ -799,6 +799,7 @@
   <div class="tab" onclick="switchTab('writing')">✍️ Writing Log</div>
   <div class="tab" onclick="switchTab('mcq')">🎯 MCQ Practice</div>
   <div class="tab" onclick="switchTab('calendar')">📅 Calendar</div>
+  <div class="tab" onclick="switchTab('notes')">📓 Notes Log</div>
 </div>
 
 <!-- ========== OVERVIEW ========== -->
@@ -947,7 +948,9 @@
 
       <div class="insight-card">
         <div class="insight-title">Today's Notes</div>
-        <textarea class="notes-area" placeholder="Jot today's key takeaways..." id="todayNotes" onchange="saveNotes()"></textarea>
+        <textarea class="notes-area" placeholder="Jot today's key takeaways and save..." id="todayNotes"></textarea>
+        <button class="add-btn" style="margin-top:10px;width:100%;justify-content:center;" onclick="saveQuickNote()">💾 Save Note</button>
+        <div style="font-size:11px;color:var(--text3);margin-top:8px;">Each save is stored separately with today's date → view all in <span style="color:var(--accent);cursor:pointer;" onclick="switchTabDirect('notes')">📓 Notes Log</span></div>
       </div>
     </div>
   </div>
@@ -1333,6 +1336,53 @@
     </div>
   </div>
 </div>
+
+<!-- ========== NOTES LOG ========== -->
+<div id="panel-notes" class="panel">
+  <div class="section-header">
+    <div class="section-title">Daily Notes Log</div>
+    <div class="section-sub">Each entry saved separately with date · searchable · synced to Google Sheets</div>
+  </div>
+
+  <div style="background:var(--surface);border:1px solid var(--border);border-radius:var(--radius);padding:20px;margin-bottom:20px;">
+    <div style="display:flex;gap:10px;align-items:center;margin-bottom:10px;flex-wrap:wrap;">
+      <div style="font-family:'DM Mono',monospace;font-size:11px;color:var(--accent);background:rgba(232,185,111,0.1);padding:4px 10px;border-radius:4px;" id="noteDate"></div>
+      <select id="noteTag" class="status-sel" style="width:160px;">
+        <option>📚 Study Note</option>
+        <option>🎯 MCQ Insight</option>
+        <option>✍️ Writing Tip</option>
+        <option>💡 Key Concept</option>
+        <option>⚠️ Mistake Log</option>
+        <option>📰 Current Affairs</option>
+        <option>🔁 Revision Note</option>
+      </select>
+      <div style="margin-left:auto;font-size:12px;color:var(--text3);">Total entries: <span id="totalNotes" style="color:var(--accent);font-family:'DM Mono',monospace;">0</span></div>
+    </div>
+    <textarea class="notes-area" id="noteInput" placeholder="Write your note here — key concepts, mistakes, insights, current affairs points..." style="min-height:110px;"></textarea>
+    <div style="display:flex;gap:10px;margin-top:10px;">
+      <button class="add-btn" style="flex:1;justify-content:center;" onclick="saveNote()">💾 Save Note</button>
+      <button class="add-btn" style="justify-content:center;border-color:var(--text3);color:var(--text3);background:transparent;" onclick="clearNoteInput()">✕ Clear</button>
+    </div>
+  </div>
+
+  <div style="display:flex;gap:10px;margin-bottom:16px;align-items:center;flex-wrap:wrap;">
+    <input type="text" id="noteSearch" placeholder="🔍  Search notes..." oninput="renderNotes()"
+      style="flex:1;min-width:200px;padding:8px 14px;border-radius:var(--radius-sm);border:1px solid var(--border);background:var(--surface2);color:var(--text);font-family:'DM Sans',sans-serif;font-size:13px;outline:none;">
+    <select id="noteFilterTag" class="status-sel" style="width:170px;" onchange="renderNotes()">
+      <option value="">All Tags</option>
+      <option>📚 Study Note</option>
+      <option>🎯 MCQ Insight</option>
+      <option>✍️ Writing Tip</option>
+      <option>💡 Key Concept</option>
+      <option>⚠️ Mistake Log</option>
+      <option>📰 Current Affairs</option>
+      <option>🔁 Revision Note</option>
+    </select>
+  </div>
+
+  <div id="notesList" style="display:flex;flex-direction:column;gap:10px;"></div>
+</div>
+
 </div>
 
 <script>
@@ -1400,6 +1450,11 @@ async function syncAll() {
     state.skippedDays.forEach(k => cRows.push([k,'skipped']));
     await pushToSheet('calendar', cRows);
 
+    // notes
+    const nRows = [['id','date','tag','text']];
+    state.notesLog.forEach(n => nRows.push([n.id, n.date, n.tag, n.text]));
+    await pushToSheet('notes', nRows);
+
     showSyncStatus('✓ Synced to Google Sheets', 'var(--interview)');
     setTimeout(() => showSyncStatus('● Cloud sync ON', 'var(--text3)'), 3000);
   } catch(e) {
@@ -1412,11 +1467,12 @@ async function syncAll() {
 async function loadFromSheets() {
   showSyncStatus('↓ Loading from Google Sheets...', 'var(--text3)');
   try {
-    const [tRaw, wRaw, mRaw, cRaw] = await Promise.all([
+    const [tRaw, wRaw, mRaw, cRaw, nRaw] = await Promise.all([
       pullFromSheet('topics'),
       pullFromSheet('writing'),
       pullFromSheet('mcq'),
       pullFromSheet('calendar'),
+      pullFromSheet('notes'),
     ]);
 
     // topics
@@ -1450,6 +1506,13 @@ async function loadFromSheets() {
       });
     }
 
+    // notes
+    if (nRaw && nRaw.length > 1) {
+      state.notesLog = nRaw.slice(1)
+        .filter(r => r[0])
+        .map(r => ({ id: r[0], date: r[1], tag: r[2], text: r[3] }));
+    }
+
     localStorage.setItem('upsc_state_2027', JSON.stringify(state));
     showSyncStatus('✓ Loaded from Google Sheets', 'var(--interview)');
     setTimeout(() => showSyncStatus('● Cloud sync ON', 'var(--text3)'), 3000);
@@ -1467,9 +1530,12 @@ let state = JSON.parse(localStorage.getItem('upsc_state_2027') || 'null') || {
   mcqSessions: [],
   studiedDays: [],
   skippedDays: [],
+  notesLog: [],
   todayNotes: '',
   streak: 0,
 };
+// migrate old state missing notesLog
+if (!state.notesLog) state.notesLog = [];
 
 // ==================== TOPICS DATA ====================
 const topics = [
@@ -1756,8 +1822,123 @@ function updateCountdown() {
 
 // ==================== NOTES ====================
 function saveNotes() {
-  state.todayNotes = document.getElementById('todayNotes').value;
+  // legacy — no longer used
+}
+
+function saveQuickNote() {
+  const text = document.getElementById('todayNotes').value.trim();
+  if (!text) { alert('Please write something before saving.'); return; }
+  const entry = {
+    id: Date.now().toString(),
+    date: new Date().toLocaleDateString('en-IN', { day:'2-digit', month:'short', year:'numeric' }),
+    tag: '📚 Study Note',
+    text
+  };
+  state.notesLog.unshift(entry);
+  document.getElementById('todayNotes').value = '';
   scheduleSave();
+  alert('✓ Note saved! View it in the Notes Log tab.');
+}
+
+function saveNote() {
+  const text = document.getElementById('noteInput').value.trim();
+  if (!text) { alert('Please write something before saving.'); return; }
+  const tag = document.getElementById('noteTag').value;
+  const entry = {
+    id: Date.now().toString(),
+    date: new Date().toLocaleDateString('en-IN', { day:'2-digit', month:'short', year:'numeric' }),
+    tag,
+    text
+  };
+  state.notesLog.unshift(entry);
+  document.getElementById('noteInput').value = '';
+  scheduleSave();
+  renderNotes();
+}
+
+function clearNoteInput() {
+  document.getElementById('noteInput').value = '';
+}
+
+function deleteNote(id) {
+  if (!confirm('Delete this note?')) return;
+  state.notesLog = state.notesLog.filter(n => n.id !== id);
+  scheduleSave();
+  renderNotes();
+}
+
+function renderNotes() {
+  const search = (document.getElementById('noteSearch')?.value || '').toLowerCase();
+  const filterTag = document.getElementById('noteFilterTag')?.value || '';
+  const list = document.getElementById('notesList');
+  if (!list) return;
+
+  document.getElementById('totalNotes').textContent = state.notesLog.length;
+
+  let filtered = state.notesLog;
+  if (search) filtered = filtered.filter(n => n.text.toLowerCase().includes(search) || n.tag.toLowerCase().includes(search));
+  if (filterTag) filtered = filtered.filter(n => n.tag === filterTag);
+
+  if (!filtered.length) {
+    list.innerHTML = `<div style="text-align:center;padding:40px;color:var(--text3);font-size:13px);">
+      ${state.notesLog.length ? 'No notes match your search.' : 'No notes yet. Start writing above!'}
+    </div>`;
+    return;
+  }
+
+  // Group by date
+  const byDate = {};
+  filtered.forEach(n => {
+    if (!byDate[n.date]) byDate[n.date] = [];
+    byDate[n.date].push(n);
+  });
+
+  const tagColors = {
+    '📚 Study Note':    { bg: 'rgba(111,200,232,0.08)', border: 'var(--prelim)' },
+    '🎯 MCQ Insight':   { bg: 'rgba(176,111,232,0.08)', border: 'var(--mcq)' },
+    '✍️ Writing Tip':   { bg: 'rgba(232,111,154,0.08)', border: 'var(--writing)' },
+    '💡 Key Concept':   { bg: 'rgba(232,185,111,0.08)', border: 'var(--accent)' },
+    '⚠️ Mistake Log':   { bg: 'rgba(232,111,111,0.08)', border: '#e86f6f' },
+    '📰 Current Affairs':{ bg: 'rgba(168,232,111,0.08)', border: 'var(--interview)' },
+    '🔁 Revision Note': { bg: 'rgba(232,185,111,0.06)', border: 'var(--text3)' },
+  };
+
+  list.innerHTML = Object.entries(byDate).map(([date, notes]) => `
+    <div>
+      <div style="font-family:'DM Mono',monospace;font-size:11px;color:var(--text3);
+                  text-transform:uppercase;letter-spacing:1px;margin-bottom:8px;
+                  padding-bottom:6px;border-bottom:1px solid var(--border);">
+        ${date} &nbsp;·&nbsp; ${notes.length} note${notes.length>1?'s':''}
+      </div>
+      ${notes.map(n => {
+        const c = tagColors[n.tag] || { bg: 'rgba(255,255,255,0.03)', border: 'var(--border)' };
+        const preview = n.text.replace(/\n/g, '<br>');
+        return `<div style="background:${c.bg};border:1px solid var(--border);border-left:3px solid ${c.border};
+                             border-radius:var(--radius-sm);padding:14px 16px;margin-bottom:8px;position:relative;">
+          <div style="display:flex;align-items:center;gap:8px;margin-bottom:8px;">
+            <span style="font-size:11px;font-family:'DM Mono',monospace;color:${c.border};
+                         background:${c.bg};border:1px solid ${c.border};
+                         padding:2px 8px;border-radius:4px;">${n.tag}</span>
+            <span style="font-size:11px;color:var(--text3);font-family:'DM Mono',monospace;">${date}</span>
+            <button onclick="deleteNote('${n.id}')"
+              style="margin-left:auto;background:none;border:none;color:var(--text3);
+                     cursor:pointer;font-size:14px;padding:0 4px;line-height:1;"
+              title="Delete note">✕</button>
+          </div>
+          <div style="font-size:13px;color:var(--text);line-height:1.7;white-space:pre-wrap;">${preview}</div>
+        </div>`;
+      }).join('')}
+    </div>
+  `).join('');
+}
+
+function switchTabDirect(tab) {
+  document.querySelectorAll('.panel').forEach(p => p.classList.remove('active'));
+  document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
+  document.getElementById('panel-' + tab).classList.add('active');
+  const tabs = document.querySelectorAll('.tab');
+  tabs.forEach(t => { if (t.textContent.includes('Notes')) t.classList.add('active'); });
+  if (tab === 'notes') renderNotes();
 }
 
 // ==================== TABS ====================
@@ -1770,6 +1951,7 @@ function switchTab(tab) {
   if (tab === 'writing') renderWritingLog();
   if (tab === 'mcq') renderMcqGrid();
   if (tab === 'calendar') renderCalendar();
+  if (tab === 'notes') renderNotes();
 }
 
 // ==================== SAVE ====================
@@ -1780,6 +1962,10 @@ function save() {
 // ==================== INIT ====================
 document.addEventListener('DOMContentLoaded', async () => {
   updateCountdown();
+  // Set today's date label in notes panel
+  const nd = document.getElementById('noteDate');
+  if (nd) nd.textContent = new Date().toLocaleDateString('en-IN', { weekday:'long', day:'2-digit', month:'long', year:'numeric' });
+
   // First paint from localStorage instantly
   updateOverallPct();
   updateStreak();
@@ -1801,6 +1987,7 @@ document.addEventListener('DOMContentLoaded', async () => {
       const id = activePanel.id.replace('panel-', '');
       if (id === 'topics') renderTopics();
       if (id === 'writing') renderWritingLog();
+      if (id === 'notes') renderNotes();
     }
   }
 });
