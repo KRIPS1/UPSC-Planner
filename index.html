@@ -1432,9 +1432,6 @@
 
 <script>
 // ==================== SHEETDB — APPEND-ONLY DATABASE ====================
-// Each user action appends exactly ONE row to the relevant sheet.
-// On load, all rows are read and state is rebuilt from them.
-// No deletes. No rewrites. Clean database behaviour.
 const SHEETDB = 'https://sheetdb.io/api/v1/uj4p9hnbs9m50';
 
 function showSyncStatus(msg, color) {
@@ -1443,101 +1440,109 @@ function showSyncStatus(msg, color) {
 }
 
 // Append a single row to a sheet
+// SheetDB POST body must be: { "data": [{ col: val, ... }] }
+// sheet name goes as query param only
 async function appendRow(sheetName, rowObj) {
   showSyncStatus('↑ Saving...', 'var(--accent)');
   try {
-    const res = await fetch(`${SHEETDB}?sheet=${sheetName}`, {
+    const url = `${SHEETDB}?sheet=${encodeURIComponent(sheetName)}`;
+    const body = JSON.stringify({ data: [rowObj] }); // no 'sheet' inside body
+    console.log(`appendRow → ${sheetName}`, rowObj);
+    const res = await fetch(url, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ data: [rowObj], sheet: sheetName })
+      body
     });
     const json = await res.json();
+    console.log(`appendRow response → ${sheetName}`, json);
     if (json.error) throw new Error(json.error);
     showSyncStatus('✓ Saved to Sheet', 'var(--interview)');
     setTimeout(() => showSyncStatus('● Cloud sync ON', 'var(--text3)'), 2000);
-    // Also save to localStorage
     localStorage.setItem('upsc_state_2027', JSON.stringify(state));
   } catch(e) {
     showSyncStatus('⚠ Sheet save failed — saved locally', '#e86f6f');
-    console.error('appendRow error:', e);
+    console.error('appendRow error:', sheetName, e);
     localStorage.setItem('upsc_state_2027', JSON.stringify(state));
   }
 }
 
-// Read all rows from a sheet
+// Read all rows from a sheet — never throws, returns []  on any error
 async function readSheet(sheetName) {
-  const res = await fetch(`${SHEETDB}?sheet=${sheetName}&limit=2000`);
-  const data = await res.json();
-  return Array.isArray(data) ? data : [];
+  try {
+    const url = `${SHEETDB}?sheet=${encodeURIComponent(sheetName)}&limit=2000`;
+    const res = await fetch(url);
+    const data = await res.json();
+    console.log(`readSheet → ${sheetName} (${Array.isArray(data) ? data.length : 'ERR'} rows)`, data);
+    return Array.isArray(data) ? data : [];
+  } catch(e) {
+    console.error(`readSheet error → ${sheetName}`, e);
+    return [];
+  }
 }
 
-// Load all data from sheets on startup and rebuild state
+// Load all data from sheets on startup — each sheet loaded independently
 async function loadFromSheets() {
-  showSyncStatus('↓ Loading from sheets...', 'var(--text3)');
+  showSyncStatus('↓ Loading...', 'var(--text3)');
   try {
-    const [notes, writing, mcq, calendar, topics] = await Promise.all([
-      readSheet('notes'),
-      readSheet('writing'),
-      readSheet('mcq'),
-      readSheet('calendar'),
-      readSheet('topics'),
-    ]);
+    // Load each sheet independently so one failure doesn't block others
+    const notesRows    = await readSheet('notes');
+    const writingRows  = await readSheet('writing');
+    const mcqRows      = await readSheet('mcq');
+    const calendarRows = await readSheet('calendar');
+    const topicsRows   = await readSheet('topics');
 
-    // Notes — each row is one note entry
-    if (notes.length > 0 && notes[0].id) {
-      state.notesLog = notes
+    // Notes — each row is one note
+    if (notesRows.length > 0 && notesRows[0].id) {
+      state.notesLog = notesRows
         .filter(r => r.id && r.text)
         .map(r => ({ id: r.id, date: r.date, tag: r.tag, text: r.text }))
         .reverse(); // newest first
     }
 
-    // Writing — each row is one answer log entry
-    if (writing.length > 0 && writing[0].id) {
-      state.writingLog = writing
+    // Writing — each row is one answer
+    if (writingRows.length > 0 && writingRows[0].id) {
+      state.writingLog = writingRows
         .filter(r => r.id && r.topic)
         .map(r => ({ id: r.id, topic: r.topic, type: r.type, date: r.date, score: r.score, status: r.status }))
         .reverse();
     }
 
     // MCQ — each row is one session
-    if (mcq.length > 0 && mcq[0].id) {
-      state.mcqSessions = mcq
+    if (mcqRows.length > 0 && mcqRows[0].id) {
+      state.mcqSessions = mcqRows
         .filter(r => r.id)
         .map(r => ({ id: r.id, subject: r.subject, total: Number(r.total), correct: Number(r.correct), date: r.date }));
     }
 
-    // Topics — each row is one status update; sort by ts so latest wins
-    if (topics.length > 0 && topics[0].id) {
-      const sorted = [...topics].sort((a, b) => Number(a.ts||0) - Number(b.ts||0));
-      const topicMap = {};
-      sorted.forEach(r => { if (r.id && r.status) topicMap[r.id] = r.status; });
-      state.topicStatus = topicMap;
+    // Topics — latest ts per topic id wins
+    if (topicsRows.length > 0 && topicsRows[0].id) {
+      const sorted = [...topicsRows].sort((a, b) => Number(a.ts||0) - Number(b.ts||0));
+      const map = {};
+      sorted.forEach(r => { if (r.id && r.status) map[r.id] = r.status; });
+      state.topicStatus = map;
     }
 
-    // Calendar — sort by ts so latest mark per day wins
-    if (calendar.length > 0 && calendar[0].key) {
-      const sorted = [...calendar].sort((a, b) => Number(a.ts||0) - Number(b.ts||0));
-      const dayMap = {};
-      sorted.forEach(r => { if (r.key && r.type) dayMap[r.key] = r.type; });
-      state.studiedDays = Object.entries(dayMap).filter(([,v]) => v === 'studied').map(([k]) => k);
-      state.skippedDays = Object.entries(dayMap).filter(([,v]) => v === 'skipped' || v === 'clear').map(([k]) => k);
-      // remove 'clear' entries from skipped
-      state.skippedDays = Object.entries(dayMap).filter(([,v]) => v === 'skipped').map(([k]) => k);
+    // Calendar — latest ts per date key wins
+    if (calendarRows.length > 0 && calendarRows[0].key) {
+      const sorted = [...calendarRows].sort((a, b) => Number(a.ts||0) - Number(b.ts||0));
+      const map = {};
+      sorted.forEach(r => { if (r.key && r.type) map[r.key] = r.type; });
+      state.studiedDays = Object.entries(map).filter(([,v]) => v === 'studied').map(([k]) => k);
+      state.skippedDays = Object.entries(map).filter(([,v]) => v === 'skipped').map(([k]) => k);
     }
 
     localStorage.setItem('upsc_state_2027', JSON.stringify(state));
-    showSyncStatus('✓ Loaded from Google Sheets', 'var(--interview)');
-    setTimeout(() => showSyncStatus('● Cloud sync ON', 'var(--text3)'), 3000);
+    showSyncStatus('✓ Loaded', 'var(--interview)');
+    setTimeout(() => showSyncStatus('● Cloud sync ON', 'var(--text3)'), 2000);
     return true;
   } catch(e) {
     showSyncStatus('⚠ Offline — using local data', '#e8b96f');
-    console.error('Load error:', e);
+    console.error('loadFromSheets error:', e);
     return false;
   }
 }
 
-// Legacy save() — only saves to localStorage, no sheet write
-// Sheet writes happen explicitly in each action function below
+// save() — localStorage only, no sheet write
 function save() {
   localStorage.setItem('upsc_state_2027', JSON.stringify(state));
 }
