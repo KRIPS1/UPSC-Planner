@@ -1431,169 +1431,101 @@
 </div>
 
 <script>
-// ==================== SHEETDB API ====================
+// ==================== SHEETDB — APPEND-ONLY DATABASE ====================
+// Each user action appends exactly ONE row to the relevant sheet.
+// On load, all rows are read and state is rebuilt from them.
+// No deletes. No rewrites. Clean database behaviour.
 const SHEETDB = 'https://sheetdb.io/api/v1/uj4p9hnbs9m50';
-
-let syncTimeout = null;
-let isSyncing = false;
-let pendingSync = false;
-let hasUnsavedChanges = false; // ONLY sync if user actually changed something
 
 function showSyncStatus(msg, color) {
   const el = document.getElementById('syncStatus');
   if (el) { el.textContent = msg; el.style.color = color || 'var(--text3)'; }
 }
 
-// SheetDB: reliably replace all rows in a sheet
-async function pushSheet(sheetName, rows) {
-  if (!rows || rows.length < 2) return;
-  const headers = rows[0];
-  const records = rows.slice(1).map(r => {
-    const obj = {};
-    headers.forEach((h, i) => obj[h] = String(r[i] ?? ''));
-    return obj;
-  });
-
-  // Delete all existing rows — await fully
+// Append a single row to a sheet
+async function appendRow(sheetName, rowObj) {
+  showSyncStatus('↑ Saving...', 'var(--accent)');
   try {
-    const delRes = await fetch(`${SHEETDB}/all?sheet=${sheetName}`, {
-      method: 'DELETE',
-      headers: { 'Content-Type': 'application/json' },
-    });
-    await delRes.json();
-  } catch(e) {
-    console.warn(`Delete failed for ${sheetName}:`, e);
-  }
-
-  // Wait for delete to commit
-  await new Promise(r => setTimeout(r, 600));
-
-  // Insert fresh rows in batches of 50
-  const batchSize = 50;
-  for (let i = 0; i < records.length; i += batchSize) {
-    const batch = records.slice(i, i + batchSize);
-    const postRes = await fetch(`${SHEETDB}?sheet=${sheetName}`, {
+    const res = await fetch(`${SHEETDB}?sheet=${sheetName}`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ data: batch, sheet: sheetName })
+      body: JSON.stringify({ data: [rowObj], sheet: sheetName })
     });
-    await postRes.json();
-  }
-}
-
-// SheetDB: read all rows
-async function pullSheet(sheetName) {
-  const res = await fetch(`${SHEETDB}?sheet=${sheetName}&limit=1000`);
-  const data = await res.json();
-  if (!Array.isArray(data)) return [];
-  return data;
-}
-
-// Called only when user makes a real change
-function scheduleSave() {
-  hasUnsavedChanges = true;
-  localStorage.setItem('upsc_state_2027', JSON.stringify(state));
-  showSyncStatus('● Unsaved changes', '#e8b96f');
-  clearTimeout(syncTimeout);
-  syncTimeout = setTimeout(syncAll, 2000);
-}
-
-async function syncAll() {
-  // Guard: never sync unless user made a real change
-  if (!hasUnsavedChanges) {
-    showSyncStatus('● Cloud sync ON', 'var(--text3)');
-    return;
-  }
-  if (isSyncing) { pendingSync = true; return; }
-  isSyncing = true;
-  hasUnsavedChanges = false;
-  showSyncStatus('↑ Syncing...', 'var(--accent)');
-  try {
-    // topics
-    const topicRows = [['id','status']];
-    Object.entries(state.topicStatus).forEach(([id,s]) => topicRows.push([id, s]));
-    if (topicRows.length > 1) await pushSheet('topics', topicRows);
-
-    // writing
-    const wRows = [['topic','type','date','score','status']];
-    state.writingLog.forEach(w => wRows.push([w.topic, w.type, w.date, w.score||'', w.status]));
-    if (wRows.length > 1) await pushSheet('writing', wRows);
-
-    // mcq
-    const mRows = [['subject','total','correct','date']];
-    state.mcqSessions.forEach(m => mRows.push([m.subject, m.total, m.correct, m.date]));
-    if (mRows.length > 1) await pushSheet('mcq', mRows);
-
-    // calendar
-    const cRows = [['key','type']];
-    state.studiedDays.forEach(k => cRows.push([k, 'studied']));
-    state.skippedDays.forEach(k => cRows.push([k, 'skipped']));
-    if (cRows.length > 1) await pushSheet('calendar', cRows);
-
-    // notes
-    const nRows = [['id','date','tag','text']];
-    state.notesLog.forEach(n => nRows.push([n.id, n.date, n.tag, n.text]));
-    if (nRows.length > 1) await pushSheet('notes', nRows);
-
-    showSyncStatus('✓ Synced to Google Sheets', 'var(--interview)');
-    setTimeout(() => showSyncStatus('● Cloud sync ON', 'var(--text3)'), 3000);
+    const json = await res.json();
+    if (json.error) throw new Error(json.error);
+    showSyncStatus('✓ Saved to Sheet', 'var(--interview)');
+    setTimeout(() => showSyncStatus('● Cloud sync ON', 'var(--text3)'), 2000);
+    // Also save to localStorage
+    localStorage.setItem('upsc_state_2027', JSON.stringify(state));
   } catch(e) {
-    hasUnsavedChanges = true; // allow retry
-    showSyncStatus('⚠ Sync failed — saved locally', '#e86f6f');
-    console.error('Sync error:', e);
+    showSyncStatus('⚠ Sheet save failed — saved locally', '#e86f6f');
+    console.error('appendRow error:', e);
+    localStorage.setItem('upsc_state_2027', JSON.stringify(state));
   }
-  isSyncing = false;
-  if (pendingSync) { pendingSync = false; syncAll(); }
 }
 
+// Read all rows from a sheet
+async function readSheet(sheetName) {
+  const res = await fetch(`${SHEETDB}?sheet=${sheetName}&limit=2000`);
+  const data = await res.json();
+  return Array.isArray(data) ? data : [];
+}
+
+// Load all data from sheets on startup and rebuild state
 async function loadFromSheets() {
-  showSyncStatus('↓ Loading from Google Sheets...', 'var(--text3)');
+  showSyncStatus('↓ Loading from sheets...', 'var(--text3)');
   try {
-    const [tRaw, wRaw, mRaw, cRaw, nRaw] = await Promise.all([
-      pullSheet('topics'),
-      pullSheet('writing'),
-      pullSheet('mcq'),
-      pullSheet('calendar'),
-      pullSheet('notes'),
+    const [notes, writing, mcq, calendar, topics] = await Promise.all([
+      readSheet('notes'),
+      readSheet('writing'),
+      readSheet('mcq'),
+      readSheet('calendar'),
+      readSheet('topics'),
     ]);
 
-    // topics
-    if (Array.isArray(tRaw) && tRaw.length > 0 && tRaw[0].id) {
-      state.topicStatus = {};
-      tRaw.forEach(r => { if (r.id) state.topicStatus[r.id] = r.status; });
+    // Notes — each row is one note entry
+    if (notes.length > 0 && notes[0].id) {
+      state.notesLog = notes
+        .filter(r => r.id && r.text)
+        .map(r => ({ id: r.id, date: r.date, tag: r.tag, text: r.text }))
+        .reverse(); // newest first
     }
 
-    // writing
-    if (Array.isArray(wRaw) && wRaw.length > 0 && wRaw[0].topic) {
-      state.writingLog = wRaw.map(r => ({
-        topic: r.topic, type: r.type, date: r.date, score: r.score, status: r.status
-      }));
+    // Writing — each row is one answer log entry
+    if (writing.length > 0 && writing[0].id) {
+      state.writingLog = writing
+        .filter(r => r.id && r.topic)
+        .map(r => ({ id: r.id, topic: r.topic, type: r.type, date: r.date, score: r.score, status: r.status }))
+        .reverse();
     }
 
-    // mcq
-    if (Array.isArray(mRaw) && mRaw.length > 0 && mRaw[0].subject) {
-      state.mcqSessions = mRaw.map(r => ({
-        subject: r.subject, total: Number(r.total), correct: Number(r.correct), date: r.date
-      }));
+    // MCQ — each row is one session
+    if (mcq.length > 0 && mcq[0].id) {
+      state.mcqSessions = mcq
+        .filter(r => r.id)
+        .map(r => ({ id: r.id, subject: r.subject, total: Number(r.total), correct: Number(r.correct), date: r.date }));
     }
 
-    // calendar
-    if (Array.isArray(cRaw) && cRaw.length > 0 && cRaw[0].key) {
-      state.studiedDays = cRaw.filter(r => r.type === 'studied').map(r => r.key);
-      state.skippedDays = cRaw.filter(r => r.type === 'skipped').map(r => r.key);
+    // Topics — each row is one status update; sort by ts so latest wins
+    if (topics.length > 0 && topics[0].id) {
+      const sorted = [...topics].sort((a, b) => Number(a.ts||0) - Number(b.ts||0));
+      const topicMap = {};
+      sorted.forEach(r => { if (r.id && r.status) topicMap[r.id] = r.status; });
+      state.topicStatus = topicMap;
     }
 
-    // notes
-    if (Array.isArray(nRaw) && nRaw.length > 0 && nRaw[0].id) {
-      state.notesLog = nRaw.map(r => ({
-        id: r.id, date: r.date, tag: r.tag, text: r.text
-      }));
+    // Calendar — sort by ts so latest mark per day wins
+    if (calendar.length > 0 && calendar[0].key) {
+      const sorted = [...calendar].sort((a, b) => Number(a.ts||0) - Number(b.ts||0));
+      const dayMap = {};
+      sorted.forEach(r => { if (r.key && r.type) dayMap[r.key] = r.type; });
+      state.studiedDays = Object.entries(dayMap).filter(([,v]) => v === 'studied').map(([k]) => k);
+      state.skippedDays = Object.entries(dayMap).filter(([,v]) => v === 'skipped' || v === 'clear').map(([k]) => k);
+      // remove 'clear' entries from skipped
+      state.skippedDays = Object.entries(dayMap).filter(([,v]) => v === 'skipped').map(([k]) => k);
     }
 
-    // Save loaded state to localStorage — but DO NOT trigger sync
     localStorage.setItem('upsc_state_2027', JSON.stringify(state));
-    hasUnsavedChanges = false; // critical: loading is NOT a change
-
     showSyncStatus('✓ Loaded from Google Sheets', 'var(--interview)');
     setTimeout(() => showSyncStatus('● Cloud sync ON', 'var(--text3)'), 3000);
     return true;
@@ -1603,6 +1535,13 @@ async function loadFromSheets() {
     return false;
   }
 }
+
+// Legacy save() — only saves to localStorage, no sheet write
+// Sheet writes happen explicitly in each action function below
+function save() {
+  localStorage.setItem('upsc_state_2027', JSON.stringify(state));
+}
+function scheduleSave() { save(); }
 
 // ==================== STATE ====================
 let state = JSON.parse(localStorage.getItem('upsc_state_2027') || 'null') || {
@@ -1707,6 +1646,8 @@ function updateTopicStatus(id, val) {
   save();
   updateOverallPct();
   renderTopics();
+  // Append to topics sheet — latest row per id wins on load
+  appendRow('topics', { id, status: val, ts: Date.now().toString() });
 }
 
 function filterTopics(cat, btn) {
@@ -1755,9 +1696,17 @@ function addWritingEntry() {
   if (!topic) return;
   const typeIdx = prompt('Type?\n0: GS Answer (150w)\n1: GS Answer (250w)\n2: Essay Draft\n3: Essay Outline\n4: Ethics Case Study\n5: Optional Answer\n\nEnter 0–5:');
   const type = writingTypes[parseInt(typeIdx)] || writingTypes[0];
-  state.writingLog.push({ topic, type, date: new Date().toLocaleDateString('en-IN'), score: '', status: 'Draft' });
+  const entry = {
+    id: Date.now().toString(),
+    topic, type,
+    date: new Date().toLocaleDateString('en-IN'),
+    score: '',
+    status: 'Draft'
+  };
+  state.writingLog.unshift(entry);
   save();
   renderWritingLog();
+  appendRow('writing', entry);
 }
 
 function updateScore(i, val) {
@@ -1820,14 +1769,20 @@ function logMcqSession() {
   const sub = document.getElementById('mcqSubject').value;
   const total = parseInt(document.getElementById('mcqTotal').value);
   const correct = parseInt(document.getElementById('mcqCorrect').value);
-  if (!total || isNaN(total) || !correct || isNaN(correct) || correct > total) {
+  if (!total || isNaN(total) || isNaN(correct) || correct > total) {
     alert('Please enter valid total and correct values.'); return;
   }
-  state.mcqSessions.push({ subject: sub, total, correct, date: new Date().toLocaleDateString('en-IN') });
+  const entry = {
+    id: Date.now().toString(),
+    subject: sub, total, correct,
+    date: new Date().toLocaleDateString('en-IN')
+  };
+  state.mcqSessions.push(entry);
   save();
   renderMcqGrid();
   document.getElementById('mcqTotal').value = '';
   document.getElementById('mcqCorrect').value = '';
+  appendRow('mcq', entry);
 }
 
 // ==================== CALENDAR ====================
@@ -1883,19 +1838,18 @@ function selectDay(key, day) {
 
 function markDay(type) {
   if (!calSelectedKey) return;
-  // Clear from both arrays first
   state.studiedDays = state.studiedDays.filter(d => d !== calSelectedKey);
   state.skippedDays = state.skippedDays.filter(d => d !== calSelectedKey);
   if (type === 'studied') state.studiedDays.push(calSelectedKey);
   else if (type === 'skipped') state.skippedDays.push(calSelectedKey);
-  // type === 'clear' just leaves it removed from both
-  scheduleSave();
+  save();
   renderCalendar();
   updateStreak();
-  // Update label
   const [y, m, d] = calSelectedKey.split('-');
   const status = type === 'studied' ? '✅ Studied' : type === 'skipped' ? '❌ Skipped' : '⬜ Not marked';
   document.getElementById('calSelectedLabel').textContent = `${d} ${months[parseInt(m)-1]} ${y} — ${status}`;
+  // Append to calendar sheet — latest row per key wins on load
+  appendRow('calendar', { key: calSelectedKey, type, ts: Date.now().toString() });
 }
 
 function changeMonth(dir) {
@@ -1946,7 +1900,8 @@ function saveQuickNote() {
   };
   state.notesLog.unshift(entry);
   document.getElementById('todayNotes').value = '';
-  scheduleSave();
+  save();
+  appendRow('notes', entry);
   alert('✓ Note saved! View it in the Notes Log tab.');
 }
 
@@ -1962,8 +1917,9 @@ function saveNote() {
   };
   state.notesLog.unshift(entry);
   document.getElementById('noteInput').value = '';
-  scheduleSave();
+  save();
   renderNotes();
+  appendRow('notes', entry);
 }
 
 function clearNoteInput() {
