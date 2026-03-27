@@ -1386,8 +1386,8 @@
 </div>
 
 <script>
-// ==================== GOOGLE SHEETS API ====================
-const API_URL = 'https://script.google.com/macros/s/AKfycbwKxlDoH7mdWG22EI_VDr4Fa44EaGQHjz_6tOa_2FmFZDg4uuiIsYwLWlbJel3sX19Q/exec';
+// ==================== SHEETDB API ====================
+const SHEETDB = 'https://sheetdb.io/api/v1/uj4p9hnbs9m50';
 
 let syncTimeout = null;
 let isSyncing = false;
@@ -1398,25 +1398,36 @@ function showSyncStatus(msg, color) {
   if (el) { el.textContent = msg; el.style.color = color || 'var(--text3)'; }
 }
 
-async function pushToSheet(sheetName, rows) {
-  try {
-    await fetch(API_URL, {
-      method: 'POST',
-      mode: 'no-cors',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ sheet: sheetName, data: rows })
-    });
-  } catch(e) { /* no-cors swallows errors — fire and forget */ }
+// SheetDB: delete all rows then insert fresh ones
+async function pushSheet(sheetName, rows) {
+  if (!rows || rows.length < 2) return; // need at least header + 1 row
+  const headers = rows[0];
+  const records = rows.slice(1).map(r => {
+    const obj = {};
+    headers.forEach((h, i) => obj[h] = r[i] ?? '');
+    return obj;
+  });
+  // 1. Delete all existing rows in this sheet
+  await fetch(`${SHEETDB}?sheet=${sheetName}`, {
+    method: 'DELETE',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ sheet: sheetName })
+  });
+  // 2. Insert fresh rows
+  await fetch(`${SHEETDB}?sheet=${sheetName}`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ data: records, sheet: sheetName })
+  });
 }
 
-async function pullFromSheet(sheetName) {
-  try {
-    const res = await fetch(`${API_URL}?sheet=${sheetName}`);
-    return await res.json();
-  } catch(e) { return null; }
+// SheetDB: read all rows from a sheet → returns array of objects
+async function pullSheet(sheetName) {
+  const res = await fetch(`${SHEETDB}?sheet=${sheetName}`);
+  return await res.json(); // [{col:val,...}, ...]
 }
 
-// Debounced sync — waits 2s after last change before pushing
+// Debounced sync — waits 2s after last change
 function scheduleSave() {
   localStorage.setItem('upsc_state_2027', JSON.stringify(state));
   showSyncStatus('● Unsaved changes', '#e8b96f');
@@ -1427,38 +1438,39 @@ function scheduleSave() {
 async function syncAll() {
   if (isSyncing) { pendingSync = true; return; }
   isSyncing = true;
-  showSyncStatus('↑ Syncing...', 'var(--text3)');
+  showSyncStatus('↑ Syncing...', 'var(--accent)');
   try {
     // topics
     const topicRows = [['id','status']];
-    Object.entries(state.topicStatus).forEach(([id,s]) => topicRows.push([id,s]));
-    await pushToSheet('topics', topicRows);
+    Object.entries(state.topicStatus).forEach(([id,s]) => topicRows.push([id, s]));
+    if (topicRows.length > 1) await pushSheet('topics', topicRows);
 
     // writing
     const wRows = [['topic','type','date','score','status']];
-    state.writingLog.forEach(w => wRows.push([w.topic, w.type, w.date, w.score, w.status]));
-    await pushToSheet('writing', wRows);
+    state.writingLog.forEach(w => wRows.push([w.topic, w.type, w.date, w.score||'', w.status]));
+    if (wRows.length > 1) await pushSheet('writing', wRows);
 
     // mcq
     const mRows = [['subject','total','correct','date']];
     state.mcqSessions.forEach(m => mRows.push([m.subject, m.total, m.correct, m.date]));
-    await pushToSheet('mcq', mRows);
+    if (mRows.length > 1) await pushSheet('mcq', mRows);
 
     // calendar
     const cRows = [['key','type']];
-    state.studiedDays.forEach(k => cRows.push([k,'studied']));
-    state.skippedDays.forEach(k => cRows.push([k,'skipped']));
-    await pushToSheet('calendar', cRows);
+    state.studiedDays.forEach(k => cRows.push([k, 'studied']));
+    state.skippedDays.forEach(k => cRows.push([k, 'skipped']));
+    if (cRows.length > 1) await pushSheet('calendar', cRows);
 
     // notes
     const nRows = [['id','date','tag','text']];
     state.notesLog.forEach(n => nRows.push([n.id, n.date, n.tag, n.text]));
-    await pushToSheet('notes', nRows);
+    if (nRows.length > 1) await pushSheet('notes', nRows);
 
     showSyncStatus('✓ Synced to Google Sheets', 'var(--interview)');
     setTimeout(() => showSyncStatus('● Cloud sync ON', 'var(--text3)'), 3000);
   } catch(e) {
     showSyncStatus('⚠ Sync failed — saved locally', '#e86f6f');
+    console.error('Sync error:', e);
   }
   isSyncing = false;
   if (pendingSync) { pendingSync = false; syncAll(); }
@@ -1468,49 +1480,44 @@ async function loadFromSheets() {
   showSyncStatus('↓ Loading from Google Sheets...', 'var(--text3)');
   try {
     const [tRaw, wRaw, mRaw, cRaw, nRaw] = await Promise.all([
-      pullFromSheet('topics'),
-      pullFromSheet('writing'),
-      pullFromSheet('mcq'),
-      pullFromSheet('calendar'),
-      pullFromSheet('notes'),
+      pullSheet('topics'),
+      pullSheet('writing'),
+      pullSheet('mcq'),
+      pullSheet('calendar'),
+      pullSheet('notes'),
     ]);
 
-    // topics
-    if (tRaw && tRaw.length > 1) {
+    // topics — [{id:'t1', status:'done'}, ...]
+    if (Array.isArray(tRaw) && tRaw.length > 0 && tRaw[0].id) {
       state.topicStatus = {};
-      tRaw.slice(1).forEach(r => { if (r[0]) state.topicStatus[r[0]] = r[1]; });
+      tRaw.forEach(r => { if (r.id) state.topicStatus[r.id] = r.status; });
     }
 
     // writing
-    if (wRaw && wRaw.length > 1) {
-      state.writingLog = wRaw.slice(1)
-        .filter(r => r[0])
-        .map(r => ({ topic: r[0], type: r[1], date: r[2], score: r[3], status: r[4] }));
+    if (Array.isArray(wRaw) && wRaw.length > 0 && wRaw[0].topic) {
+      state.writingLog = wRaw.map(r => ({
+        topic: r.topic, type: r.type, date: r.date, score: r.score, status: r.status
+      }));
     }
 
     // mcq
-    if (mRaw && mRaw.length > 1) {
-      state.mcqSessions = mRaw.slice(1)
-        .filter(r => r[0])
-        .map(r => ({ subject: r[0], total: Number(r[1]), correct: Number(r[2]), date: r[3] }));
+    if (Array.isArray(mRaw) && mRaw.length > 0 && mRaw[0].subject) {
+      state.mcqSessions = mRaw.map(r => ({
+        subject: r.subject, total: Number(r.total), correct: Number(r.correct), date: r.date
+      }));
     }
 
     // calendar
-    if (cRaw && cRaw.length > 1) {
-      state.studiedDays = [];
-      state.skippedDays = [];
-      cRaw.slice(1).forEach(r => {
-        if (!r[0]) return;
-        if (r[1] === 'studied') state.studiedDays.push(r[0]);
-        else if (r[1] === 'skipped') state.skippedDays.push(r[0]);
-      });
+    if (Array.isArray(cRaw) && cRaw.length > 0 && cRaw[0].key) {
+      state.studiedDays = cRaw.filter(r => r.type === 'studied').map(r => r.key);
+      state.skippedDays = cRaw.filter(r => r.type === 'skipped').map(r => r.key);
     }
 
     // notes
-    if (nRaw && nRaw.length > 1) {
-      state.notesLog = nRaw.slice(1)
-        .filter(r => r[0])
-        .map(r => ({ id: r[0], date: r[1], tag: r[2], text: r[3] }));
+    if (Array.isArray(nRaw) && nRaw.length > 0 && nRaw[0].id) {
+      state.notesLog = nRaw.map(r => ({
+        id: r.id, date: r.date, tag: r.tag, text: r.text
+      }));
     }
 
     localStorage.setItem('upsc_state_2027', JSON.stringify(state));
@@ -1519,6 +1526,7 @@ async function loadFromSheets() {
     return true;
   } catch(e) {
     showSyncStatus('⚠ Offline — using local data', '#e8b96f');
+    console.error('Load error:', e);
     return false;
   }
 }
